@@ -63,9 +63,9 @@ Colab 메뉴에서 **런타임 → 런타임 유형 변경 → GPU**를 선택�
 
 code(
     r"""
-# Colab에 기본 설치된 Gradio 6.x는 Hugging Face Hub 1.x를 요구하지만,
-# 이 노트북의 Transformers 4.x와 InternVL 실행에는 Gradio가 필요하지 않습니다.
-%pip uninstall -q -y gradio gradio_client
+# Colab 기본 Gradio와 구버전 torchao는 현재 Transformers/PEFT 조합과
+# 의존성 충돌을 일으킬 수 있으며 이 노트북에서는 둘 다 사용하지 않습니다.
+%pip uninstall -q -y gradio gradio_client torchao
 
 %pip install -q -U \
   "transformers>=4.57.0,<5" \
