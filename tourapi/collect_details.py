@@ -32,7 +32,7 @@ from test_connection import (
 
 
 SCRIPT_DIR = Path(__file__).resolve().parent
-DEFAULT_INPUT = SCRIPT_DIR / "data" / "area_based" / "image_candidates.jsonl"
+DEFAULT_INPUT = SCRIPT_DIR / "data" / "targets" / "broad_image_candidates.jsonl"
 DEFAULT_OUTPUT_DIR = SCRIPT_DIR / "data" / "details"
 OPERATION = "detailCommon2"
 
@@ -44,7 +44,7 @@ class ApiResultError(RuntimeError):
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "image_candidates.jsonl의 contentId별 overview를 수집합니다. "
+            "광범위 대회 후보 JSONL의 contentId별 overview를 수집합니다. "
             "기본 일일 예산 900회에 도달하면 자동 종료합니다."
         )
     )
@@ -405,8 +405,9 @@ def main() -> int:
             for row in candidates
             if str(row.get("contentid", "")).strip() not in completed
         ]
+        target_completed_count = len(candidates) - len(pending)
         print(f"전체 이미지 후보       : {len(candidates):,}건")
-        print(f"기수집 완료            : {len(completed):,}건")
+        print(f"후보 중 기수집 완료    : {target_completed_count:,}건")
         print(f"오늘 기록된 상세 호출  : {used_today:,}회")
         print(f"이번 실행 최대 신규 호출: {run_limit:,}회")
 
