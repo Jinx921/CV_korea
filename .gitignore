@@ -21,6 +21,7 @@ venv/
 
 # Data
 data/*
+tourapi/data/
 
 # Model checkpoints
 *.pt
