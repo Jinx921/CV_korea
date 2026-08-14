@@ -2,7 +2,7 @@
 """한국관광공사 TourAPI 연결 및 페이지 크기 테스트.
 
 이 스크립트는 실행할 때마다 ``areaBasedList2``를 정확히 한 번 호출한다.
-API 키는 ``TOUR_API_KEY`` 환경변수 또는 같은 폴더의 ``.env``에서 읽으며,
+API 키는 ``TOUR_API_KEY`` 환경변수 또는 ``PROJECT_ROOT/.env``에서 읽으며
 화면이나 파일에 출력하지 않는다.
 """
 
