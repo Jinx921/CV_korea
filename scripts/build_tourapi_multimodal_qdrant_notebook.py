@@ -50,20 +50,64 @@ markdown(
 )
 
 
-markdown("### 1. 패키지 설치 및 Google Drive 연결")
+markdown("### 1. 패키지 설치, 런타임 1회 재시작 및 Google Drive 연결")
 
 
 code(
     r"""
-%pip install -q -U \
-  "sentence-transformers>=3.4,<6" \
-  "transformers>=4.53,<6" \
-  "qdrant-client>=1.14,<2" \
-  "Pillow>=10.4" \
-  "tqdm>=4.66"
+import os
+import signal
+import subprocess
+import sys
+from pathlib import Path
 
+
+# Colab 기본 Pillow와 pip로 갱신된 Pillow가 섞이면
+# `cannot import name '_Ink' from PIL._typing` 오류가 발생할 수 있습니다.
+# 최초 1회만 Pillow를 완전히 재설치한 뒤 Python 프로세스를 자동 재시작합니다.
+SETUP_MARKER = Path("/content/.tourapi_multimodal_rag_dependencies_v2")
+
+if not SETUP_MARKER.exists():
+    print("RAG 패키지를 설치합니다. 완료 후 런타임이 한 번 자동 재시작됩니다.")
+    subprocess.run(
+        [sys.executable, "-m", "pip", "uninstall", "-y", "Pillow"],
+        check=False,
+    )
+    subprocess.check_call(
+        [
+            sys.executable,
+            "-m",
+            "pip",
+            "install",
+            "-q",
+            "--no-cache-dir",
+            "--force-reinstall",
+            "Pillow==11.3.0",
+        ]
+    )
+    subprocess.check_call(
+        [
+            sys.executable,
+            "-m",
+            "pip",
+            "install",
+            "-q",
+            "-U",
+            "sentence-transformers>=3.4,<6",
+            "transformers>=4.53,<6",
+            "qdrant-client>=1.14,<2",
+            "tqdm>=4.66",
+        ]
+    )
+    SETUP_MARKER.write_text("ready\n", encoding="utf-8")
+    print("설치 완료. 런타임을 재시작합니다. 재연결 후 '모두 실행'을 다시 누르세요.")
+    os.kill(os.getpid(), signal.SIGKILL)
+
+import PIL
+from PIL import Image, ImageOps
 from google.colab import drive
 
+print("Pillow 정상 로드:", PIL.__version__)
 drive.mount("/content/drive")
 print("Google Drive 연결 완료")
 """
