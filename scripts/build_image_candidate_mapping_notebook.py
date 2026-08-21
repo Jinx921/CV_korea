@@ -104,7 +104,10 @@ RAG_DB_DIR = DRIVE_PROJECT_DIR / "tourapi_image_db"
 RAG_JSONL = RAG_DB_DIR / "tourapi_with_images.jsonl"
 
 MAPPING_ROOT = RAG_DB_DIR / "mapping"
-INDEX_DIR = MAPPING_ROOT / "image_dino_clip_index"
+# Google Drive에서 1GB 이상 memmap을 직접 갱신하면 Errno 5가 발생할 수 있습니다.
+# Drive에는 재개 가능한 batch chunk만 두고, 큰 배열은 Colab 로컬 디스크에서 조립합니다.
+INDEX_DIR = MAPPING_ROOT / "image_dino_clip_index_chunked"
+LOCAL_INDEX_DIR = Path("/content/image_dino_clip_index_work")
 OUTPUT_DIR = MAPPING_ROOT / "image_candidates"
 EXTRACT_DIR = Path("/content/competition_image_mapping_data")
 
@@ -113,9 +116,10 @@ CLIP_MODEL_NAME = "openai/clip-vit-base-patch32"
 
 STAGE1_TOPK_PER_MODEL = 15
 FINAL_TOPK = 5
-RAG_BATCH_SIZE = 32
+RAG_BATCH_SIZE = 16
 QUERY_BATCH_SIZE = 8
 MAX_IMAGE_SIDE = 1600
+DRIVE_IO_RETRIES = 5
 
 # 인덱스 모델·RAG 입력이 바뀌었을 때만 True로 변경합니다.
 REBUILD_RAG_INDEX = False
@@ -317,7 +321,9 @@ markdown("### 5. DINOv2·CLIP 모델 로드")
 code(
     r'''
 import gc
+import io
 import numpy as np
+import time
 import torch
 import torch.nn.functional as F
 from PIL import Image, ImageFile
@@ -342,18 +348,38 @@ clip_model = CLIPModel.from_pretrained(
 
 
 def safe_open_rgb(path, max_side=MAX_IMAGE_SIDE):
-    image = Image.open(path)
-    try:
-        image.draft("RGB", (max_side, max_side))
-    except Exception:
-        pass
-    width, height = image.size
-    if width * height > 80_000_000:
-        raise ValueError(f"지나치게 큰 이미지입니다: {width}x{height}")
-    image = image.convert("RGB")
-    if max(image.size) > max_side:
-        image.thumbnail((max_side, max_side))
-    return image
+    path = Path(path)
+    last_error = None
+    for attempt in range(1, DRIVE_IO_RETRIES + 1):
+        try:
+            # PIL이 Drive 파일을 지연 읽기하지 않도록 먼저 bytes로 완전히 읽습니다.
+            payload = path.read_bytes()
+            image = Image.open(io.BytesIO(payload))
+            try:
+                image.draft("RGB", (max_side, max_side))
+            except Exception:
+                pass
+            width, height = image.size
+            if width * height > 80_000_000:
+                raise ValueError(f"지나치게 큰 이미지입니다: {width}x{height}")
+            image = image.convert("RGB")
+            if max(image.size) > max_side:
+                image.thumbnail((max_side, max_side))
+            image.load()
+            return image
+        except OSError as error:
+            last_error = error
+            if attempt == DRIVE_IO_RETRIES:
+                break
+            wait_seconds = min(2 ** (attempt - 1), 8)
+            print(
+                f"Drive 이미지 읽기 재시도 {attempt}/{DRIVE_IO_RETRIES}: "
+                f"{path.name} ({error})"
+            )
+            time.sleep(wait_seconds)
+    raise OSError(
+        f"{DRIVE_IO_RETRIES}회 재시도 후에도 이미지를 읽지 못했습니다: {path}"
+    ) from last_error
 
 
 def clip_image_features(inputs):
@@ -383,6 +409,9 @@ def embed_images(paths):
 dummy_cls, dummy_patches, dummy_clip = embed_images(
     [rag_records[0]["absolute_image_path"]]
 )
+DINO_CLS_DIM = int(dummy_cls.shape[-1])
+DINO_PATCH_COUNT = int(dummy_patches.shape[1])
+CLIP_IMAGE_DIM = int(dummy_clip.shape[-1])
 print("DINO CLS:", tuple(dummy_cls.shape))
 print("DINO patch:", tuple(dummy_patches.shape))
 print("CLIP:", tuple(dummy_clip.shape))
@@ -398,67 +427,72 @@ markdown("### 6. RAG 이미지 인덱스 생성 또는 이어서 실행")
 
 code(
     r'''
+import shutil
 from numpy.lib.format import open_memmap
 
 
-RAG_DINO_CLS_PATH = INDEX_DIR / "rag_dino_cls.npy"
-RAG_DINO_PATCH_PATH = INDEX_DIR / "rag_dino_patch.npy"
-RAG_CLIP_PATH = INDEX_DIR / "rag_clip.npy"
+CHUNK_DIR = INDEX_DIR / "chunks"
 RAG_META_PATH = INDEX_DIR / "rag_meta.jsonl"
 INDEX_STATE_PATH = INDEX_DIR / "index_state.json"
+LOCAL_RAG_DINO_CLS_PATH = LOCAL_INDEX_DIR / "rag_dino_cls.npy"
+LOCAL_RAG_DINO_PATCH_PATH = LOCAL_INDEX_DIR / "rag_dino_patch.npy"
+LOCAL_RAG_CLIP_PATH = LOCAL_INDEX_DIR / "rag_clip.npy"
 
 index_signature = {
+    "storage_format": "drive_batch_chunks_v2",
     "rag_fingerprint": rag_fingerprint,
     "record_count": len(rag_records),
     "dino_model": DINO_MODEL_NAME,
     "clip_model": CLIP_MODEL_NAME,
-    "dino_dim": int(dino_model.config.hidden_size),
-    "clip_dim": int(clip_model.config.projection_dim),
-    "patch_count": int(dino_model.config.image_size // dino_model.config.patch_size) ** 2,
+    # config.image_size가 아니라 실제 processor 출력 shape를 사용해야 합니다.
+    # DINOv2-base processor는 224x224 crop, patch 14이므로 실제 patch 수는 256입니다.
+    "dino_dim": DINO_CLS_DIM,
+    "clip_dim": CLIP_IMAGE_DIM,
+    "patch_count": DINO_PATCH_COUNT,
 }
 
-required_index_paths = [
-    RAG_DINO_CLS_PATH,
-    RAG_DINO_PATCH_PATH,
-    RAG_CLIP_PATH,
-    RAG_META_PATH,
-]
-
 if REBUILD_RAG_INDEX:
-    for path in required_index_paths + [INDEX_STATE_PATH]:
+    if CHUNK_DIR.exists():
+        shutil.rmtree(CHUNK_DIR)
+    for path in [RAG_META_PATH, INDEX_STATE_PATH]:
         if path.exists():
             path.unlink()
 
+CHUNK_DIR.mkdir(parents=True, exist_ok=True)
 state = None
 if INDEX_STATE_PATH.exists():
     state = json.loads(INDEX_STATE_PATH.read_text(encoding="utf-8"))
-    previous_signature = {key: state.get(key) for key in index_signature}
-    if previous_signature != index_signature:
+    identity_keys = (
+        "storage_format",
+        "rag_fingerprint",
+        "record_count",
+        "dino_model",
+        "clip_model",
+    )
+    previous_identity = {key: state.get(key) for key in identity_keys}
+    current_identity = {key: index_signature[key] for key in identity_keys}
+    if previous_identity != current_identity:
         raise RuntimeError(
             "기존 인덱스와 현재 RAG 입력/모델이 다릅니다. "
             "내용을 확인한 뒤 REBUILD_RAG_INDEX=True로 다시 실행하세요."
         )
+    previous_dimensions = {
+        key: state.get(key) for key in ("dino_dim", "clip_dim", "patch_count")
+    }
+    current_dimensions = {
+        key: index_signature[key] for key in ("dino_dim", "clip_dim", "patch_count")
+    }
+    if previous_dimensions != current_dimensions:
+        # v1 노트북은 config.image_size로 patch_count=1369를 기록했지만 실제 chunk는
+        # processor 출력인 256 patch로 정상 저장했습니다. chunk를 삭제하지 않고
+        # state의 shape 정보만 실제 tensor shape로 교정합니다.
+        print("인덱스 shape 상태값을 실제 모델 출력에 맞게 교정합니다.")
+        print("이전:", previous_dimensions)
+        print("현재:", current_dimensions)
+        state.update(index_signature)
+        atomic_write_json(INDEX_STATE_PATH, state)
 
 if state is None:
-    n = len(rag_records)
-    open_memmap(
-        RAG_DINO_CLS_PATH,
-        mode="w+",
-        dtype=np.float16,
-        shape=(n, index_signature["dino_dim"]),
-    ).flush()
-    open_memmap(
-        RAG_DINO_PATCH_PATH,
-        mode="w+",
-        dtype=np.float16,
-        shape=(n, index_signature["patch_count"], index_signature["dino_dim"]),
-    ).flush()
-    open_memmap(
-        RAG_CLIP_PATH,
-        mode="w+",
-        dtype=np.float16,
-        shape=(n, index_signature["clip_dim"]),
-    ).flush()
     with RAG_META_PATH.open("w", encoding="utf-8") as handle:
         for row in rag_records:
             metadata = {
@@ -466,32 +500,138 @@ if state is None:
                 if key != "absolute_image_path"
             }
             handle.write(json.dumps(metadata, ensure_ascii=False) + "\n")
-    state = {**index_signature, "next_index": 0, "complete": False}
+    state = {**index_signature, "completed_chunk_count": 0, "complete": False}
     atomic_write_json(INDEX_STATE_PATH, state)
 
-rag_dino_cls_memmap = np.load(RAG_DINO_CLS_PATH, mmap_mode="r+")
-rag_dino_patch_memmap = np.load(RAG_DINO_PATCH_PATH, mmap_mode="r+")
-rag_clip_memmap = np.load(RAG_CLIP_PATH, mmap_mode="r+")
+chunk_ranges = [
+    (start, min(start + RAG_BATCH_SIZE, len(rag_records)))
+    for start in range(0, len(rag_records), RAG_BATCH_SIZE)
+]
 
-start_index = int(state.get("next_index", 0))
-for start in tqdm(
-    range(start_index, len(rag_records), RAG_BATCH_SIZE),
-    desc="RAG 이미지 인덱스",
-):
+
+def chunk_path_for(start, end):
+    return CHUNK_DIR / f"chunk_{start:06d}_{end:06d}.npz"
+
+
+def copy_to_drive_with_retry(source, destination):
+    source = Path(source)
+    destination = Path(destination)
+    temporary = destination.with_suffix(destination.suffix + ".tmp")
+    last_error = None
+    for attempt in range(1, DRIVE_IO_RETRIES + 1):
+        try:
+            if temporary.exists():
+                temporary.unlink()
+            shutil.copyfile(source, temporary)
+            temporary.replace(destination)
+            return
+        except OSError as error:
+            last_error = error
+            if attempt < DRIVE_IO_RETRIES:
+                print(
+                    f"Drive chunk 저장 재시도 {attempt}/{DRIVE_IO_RETRIES}: "
+                    f"{destination.name} ({error})"
+                )
+                time.sleep(min(2 ** (attempt - 1), 8))
+    raise OSError(f"Drive chunk 저장 실패: {destination}") from last_error
+
+
+for start, end in tqdm(chunk_ranges, desc="RAG 이미지 인덱스"):
+    chunk_path = chunk_path_for(start, end)
+    if chunk_path.is_file() and chunk_path.stat().st_size > 0:
+        continue
     end = min(start + RAG_BATCH_SIZE, len(rag_records))
     paths = [row["absolute_image_path"] for row in rag_records[start:end]]
     dino_cls, dino_patches, clip_features = embed_images(paths)
-    rag_dino_cls_memmap[start:end] = dino_cls.float().cpu().numpy().astype(np.float16)
-    rag_dino_patch_memmap[start:end] = dino_patches.float().cpu().numpy().astype(np.float16)
-    rag_clip_memmap[start:end] = clip_features.float().cpu().numpy().astype(np.float16)
-    rag_dino_cls_memmap.flush()
-    rag_dino_patch_memmap.flush()
-    rag_clip_memmap.flush()
-    state = {**index_signature, "next_index": end, "complete": end == len(rag_records)}
+    local_chunk_path = Path(f"/content/{chunk_path.name}")
+    np.savez(
+        local_chunk_path,
+        dino_cls=dino_cls.float().cpu().numpy().astype(np.float16),
+        dino_patch=dino_patches.float().cpu().numpy().astype(np.float16),
+        clip=clip_features.float().cpu().numpy().astype(np.float16),
+    )
+    copy_to_drive_with_retry(local_chunk_path, chunk_path)
+    local_chunk_path.unlink(missing_ok=True)
+    completed_chunk_count = sum(
+        chunk_path_for(chunk_start, chunk_end).is_file()
+        for chunk_start, chunk_end in chunk_ranges
+    )
+    state = {
+        **index_signature,
+        "completed_chunk_count": completed_chunk_count,
+        "complete": completed_chunk_count == len(chunk_ranges),
+    }
     atomic_write_json(INDEX_STATE_PATH, state)
+    del dino_cls, dino_patches, clip_features
+    torch.cuda.empty_cache()
 
-if not state.get("complete"):
+missing_chunks = [
+    chunk_path_for(start, end)
+    for start, end in chunk_ranges
+    if not chunk_path_for(start, end).is_file()
+]
+if missing_chunks:
     raise RuntimeError("RAG 이미지 인덱스가 아직 완료되지 않았습니다.")
+
+print("Drive chunk 완료. Colab 로컬 검색 배열을 조립합니다.")
+if LOCAL_INDEX_DIR.exists():
+    shutil.rmtree(LOCAL_INDEX_DIR)
+LOCAL_INDEX_DIR.mkdir(parents=True, exist_ok=True)
+n = len(rag_records)
+rag_dino_cls_memmap = open_memmap(
+    LOCAL_RAG_DINO_CLS_PATH,
+    mode="w+",
+    dtype=np.float16,
+    shape=(n, index_signature["dino_dim"]),
+)
+rag_dino_patch_memmap = open_memmap(
+    LOCAL_RAG_DINO_PATCH_PATH,
+    mode="w+",
+    dtype=np.float16,
+    shape=(n, index_signature["patch_count"], index_signature["dino_dim"]),
+)
+rag_clip_memmap = open_memmap(
+    LOCAL_RAG_CLIP_PATH,
+    mode="w+",
+    dtype=np.float16,
+    shape=(n, index_signature["clip_dim"]),
+)
+
+for start, end in tqdm(chunk_ranges, desc="로컬 인덱스 조립"):
+    drive_chunk_path = chunk_path_for(start, end)
+    local_chunk_path = LOCAL_INDEX_DIR / drive_chunk_path.name
+    last_error = None
+    for attempt in range(1, DRIVE_IO_RETRIES + 1):
+        try:
+            shutil.copyfile(drive_chunk_path, local_chunk_path)
+            break
+        except OSError as error:
+            last_error = error
+            if attempt < DRIVE_IO_RETRIES:
+                print(
+                    f"Drive chunk 읽기 재시도 {attempt}/{DRIVE_IO_RETRIES}: "
+                    f"{drive_chunk_path.name} ({error})"
+                )
+                time.sleep(min(2 ** (attempt - 1), 8))
+    else:
+        raise OSError(f"Drive chunk 읽기 실패: {drive_chunk_path}") from last_error
+    with np.load(local_chunk_path) as chunk:
+        if chunk["dino_cls"].shape[0] != end - start:
+            raise RuntimeError(f"손상된 chunk입니다: {chunk_path_for(start, end)}")
+        rag_dino_cls_memmap[start:end] = chunk["dino_cls"]
+        rag_dino_patch_memmap[start:end] = chunk["dino_patch"]
+        rag_clip_memmap[start:end] = chunk["clip"]
+    local_chunk_path.unlink(missing_ok=True)
+
+rag_dino_cls_memmap.flush()
+rag_dino_patch_memmap.flush()
+rag_clip_memmap.flush()
+state = {
+    **index_signature,
+    "completed_chunk_count": len(chunk_ranges),
+    "complete": True,
+}
+atomic_write_json(INDEX_STATE_PATH, state)
 
 print("RAG 이미지 인덱스 완료")
 print("DINO CLS:", rag_dino_cls_memmap.shape)
