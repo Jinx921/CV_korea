@@ -6,6 +6,15 @@
 
 [▶ Live Demo](https://youtube.com/shorts/V9Fk6n_ODyo?feature=share) · [🤗 Base Model](https://huggingface.co/kakaocorp/kanana-1.5-v-3b-instruct)
 
+## Team
+
+비타민 17기 CV조
+
+- 곽혜진
+- 김준형
+- 이신영
+- 이정빈
+
 ## 프로젝트 개요
 
 일반적인 VQA와 달리 한국문화 질의응답은 이미지 인식만으로 풀기 어렵습니다. 문화재·의복·생활 도구의 **고유명사와 배경지식**, 이미지 속 작은 글씨, 그리고 음절·어절 수와 같은 **출력 형식 제약**을 함께 처리해야 합니다.
@@ -311,12 +320,3 @@ python -m unittest discover -s tests -v
 - SA의 음절·어절 수 제약은 재시도로 완화하지만 완전한 보장은 어렵습니다. 생성 과정 자체를 통제하는 constrained decoding이 필요합니다.
 - 작은 글씨가 핵심인 문항은 이미지 해상도와 visual token·VRAM 사이의 trade-off가 큽니다. OCR 필요도를 판단해 선택적으로 고해상도 입력을 사용하는 전략을 확장할 수 있습니다.
 - Retrieval 품질은 외부 지식 DB의 범위와 entity-image mapping 정확도에 영향을 받습니다.
-
-## Team
-
-비타민 17기 CV조
-
-- 곽혜진
-- 김준형
-- 이신영
-- 이정빈
