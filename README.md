@@ -4,7 +4,7 @@
 
 > **Final Average 47.40** — 3B Kanana-V 기반 시스템으로 EXAONE-4.5-33B-VL LoRA baseline(46.99)을 상회했습니다.
 
-[▶ Live Demo](https://youtube.com/shorts/V9Fk6n_ODyo?feature=share) · [🤗 Base Model](https://huggingface.co/kakaocorp/kanana-1.5-v-3b-instruct)
+[💻 전체 구현 코드](https://github.com/kjh0902/AIVQA) · [▶ Live Demo](https://youtube.com/shorts/V9Fk6n_ODyo?feature=share) · [🤗 Base Model](https://huggingface.co/kakaocorp/kanana-1.5-v-3b-instruct)
 
 ## Team
 
@@ -101,7 +101,7 @@ Qdrant에는 entity 하나를 point 하나로 저장합니다.
 
 검색 결과는 정답이 아닌 **soft reference**로 prompt에 전달합니다. 모델에는 사진·질문과 맞지 않는 검색 결과를 무시하도록 명시해 retrieval error의 영향을 줄입니다. Train·validation·test 검색 결과는 `rag_cache/`에 한 번 저장하고 학습과 추론에서 동일하게 재사용합니다.
 
-구현 상세는 [`rag_db/README.md`](rag_db/README.md)를 참고하세요.
+구현 상세는 [RAG DB 문서](https://github.com/kjh0902/AIVQA/blob/main/rag_db/README.md)를 참고하세요.
 
 ### 2. LLM-only LoRA
 
@@ -141,7 +141,7 @@ Train 전체로 Shared Adapter를 먼저 학습하고 validation `final_score`�
 
 SA는 질문에서 음절·어절 수와 복수 답변 조건을 파싱합니다. 첫 생성이 형식 검사를 통과하지 못하면 실패 이유와 원문 질문을 함께 제공해 최대 3회 다시 풉니다. 답을 기계적으로 자르는 대신 의미와 형식을 모두 만족하는 답을 재생성합니다.
 
-구현 상세는 [`type_adapters/README.md`](type_adapters/README.md)를 참고하세요.
+구현 상세는 [유형별 Adapter 문서](https://github.com/kjh0902/AIVQA/blob/main/type_adapters/README.md)를 참고하세요.
 
 ## 실험 결과
 
