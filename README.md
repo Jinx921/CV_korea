@@ -6,6 +6,8 @@
 
 [💻 전체 구현 코드](https://github.com/kjh0902/AIVQA) · [▶ Live Demo](https://youtube.com/shorts/V9Fk6n_ODyo?feature=share) · [🤗 Base Model](https://huggingface.co/kakaocorp/kanana-1.5-v-3b-instruct)
 
+> 📝 **Paper in preparation** — 본 프로젝트의 방법론과 실험 결과를 논문으로 정리하고 있습니다.
+
 ## Team
 
 비타민 17기 CV조
